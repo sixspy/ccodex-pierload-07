@@ -33,6 +33,10 @@ class TicketIn(BaseModel):
     vehicle_plate: str
     axle_weights: list[AxleWeight]
     ticket_code: str | None = None
+    parent_ticket_id: int | None = None
+    edge_type: str = "续磅"
+    edge_detail: str = ""
+    edge_mode: str | None = None
 
 
 class OverloadOpenIn(BaseModel):
@@ -68,8 +72,15 @@ class LineageIn(BaseModel):
     to_ticket_id: int | None = None
     edge_type: str
     detail: str
+    edge_status: str = "影子"
 
 
 class StubJobIn(BaseModel):
     mode: str = "dry_run"
     detail: str = ""
+
+
+class FateBookIn(BaseModel):
+    locked_path: str = "甲"
+    note: str = ""
+    force: bool = False

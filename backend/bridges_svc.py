@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+import edge_write
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from models import BridgeIn
@@ -39,10 +40,25 @@ def get_bridge(bridge_id: int, authorization: AuthHeader = None):
                WHERE l.bridge_id=? AND t.status NOT IN ('作废','已封闸')""",
             (bridge_id,),
         ).fetchone()
+        bridge_tickets = conn.execute(
+            """SELECT t.id, t.ticket_code FROM weigh_tickets t
+               JOIN weigh_lanes l ON l.id=t.lane_id
+               WHERE l.bridge_id=? AND t.status!='作废' ORDER BY t.id""",
+            (bridge_id,),
+        ).fetchall()
+        broken = [
+            r["ticket_code"]
+            for r in bridge_tickets
+            if not edge_write.ticket_lineage_complete(conn, int(r["id"]))
+        ]
         return {
             "bridge": dict(row),
             "lanes": [dict(x) for x in lanes],
             "active_tickets": stats["active"],
+            "lineage": {
+                "lineage_complete": not broken,
+                "broken_tickets": broken,
+            },
         }
 
 

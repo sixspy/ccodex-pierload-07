@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from fastapi import APIRouter, HTTPException
 
+import edge_write
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import acquire_business_locks, release_business_locks, session_holder
 from models import TicketIn
 from validators import (
     adjudicate_overload,
@@ -31,6 +33,37 @@ def _next_ticket_code(conn, lane_id: int) -> str:
     return f"WT-{prefix}-{n + 1:03d}"
 
 
+def _resolve_edge_path(conn, body: TicketIn, user: str) -> tuple[str, str]:
+    """返回 (命运册锁定路径, 本次请求请求路径)。偏离即记偏航并拒写。"""
+    book = edge_write.fate_book(conn)
+    locked = book["locked_path"]
+    requested = edge_write.normalize_path(body.edge_mode) or locked
+    if requested != locked:
+        write_audit(
+            conn,
+            user,
+            "写边偏航",
+            body.ticket_code or "",
+            {
+                "locked_path": locked,
+                "requested_path": requested,
+                "parent_ticket_id": body.parent_ticket_id,
+                "reason": "偏离港区写边命运册",
+            },
+        )
+        conn.commit()
+        raise HTTPException(409, "偏离命运册：写边偏航，拒写")
+    return locked, requested
+
+
+def _ticket_locks(body: TicketIn) -> list[str]:
+    keys = [f"lane:{body.lane_id}"]
+    if body.parent_ticket_id is not None:
+        # 同父票续磅：以父票锁串行化，后到只记争用痕
+        keys.append(f"ticket:{body.parent_ticket_id}")
+    return keys
+
+
 @router.get("/api/tickets")
 def list_tickets(authorization: AuthHeader = None, status: str | None = None):
     require_user(authorization)
@@ -48,6 +81,9 @@ def list_tickets(authorization: AuthHeader = None, status: str | None = None):
         for r in rows:
             d = dict(r)
             d["axle_weights"] = json.loads(d["axle_weights"] or "[]")
+            d["lineage_complete"] = edge_write.ticket_lineage_complete(
+                conn, int(d["id"])
+            )
             items.append(d)
         return {"items": items}
 
@@ -80,21 +116,39 @@ def get_ticket(ticket_id: int, authorization: AuthHeader = None):
             "SELECT * FROM gate_releases WHERE ticket_id=? ORDER BY id DESC",
             (ticket_id,),
         ).fetchall()
+        complete = edge_write.ticket_lineage_complete(conn, ticket_id)
         return {
             "ticket": data,
             "overload_holds": [dict(h) for h in holds],
             "gate_seals": [dict(s) for s in seals],
             "gate_releases": [dict(r) for r in releases],
+            "lineage": {
+                "lineage_complete": complete,
+                "broken": not complete,
+                "reason": None
+                if complete
+                else (
+                    "存在未晋升影子连边"
+                    if edge_write.pending_inbound(conn, ticket_id)
+                    else "父票已登记但正式血缘边缺失"
+                    if data.get("parent_ticket_id")
+                    else "票已存在未晋升影子连边"
+                ),
+                "formal_inbound": edge_write.formal_inbound(conn, ticket_id),
+                "pending_inbound": edge_write.pending_inbound(conn, ticket_id),
+            },
         }
 
 
 @router.post("/api/tickets")
 def create_ticket(body: TicketIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
-    lock_key = f"lane:{body.lane_id}"
-    with connect() as conn:
-        require_lock(conn, lock_key, user)
-        try:
+    # 会话级持锁：同账号两路并发写也必须互斥，不得因同名持有而“双成”
+    holder = session_holder(user)
+    lock_keys = _ticket_locks(body)
+    held = acquire_business_locks(lock_keys, holder)
+    try:
+        with connect() as conn:
             lane = conn.execute(
                 """SELECT l.*, b.max_gross_t, b.axle_limit FROM weigh_lanes l
                    JOIN weigh_bridges b ON b.id=l.bridge_id WHERE l.id=?""",
@@ -112,6 +166,14 @@ def create_ticket(body: TicketIn, authorization: AuthHeader = None):
             ).fetchone()
             if not bl:
                 raise HTTPException(422, "提单册未登记")
+            parent_id = body.parent_ticket_id
+            if parent_id is not None:
+                parent = conn.execute(
+                    "SELECT id FROM weigh_tickets WHERE id=?", (parent_id,)
+                ).fetchone()
+                if not parent:
+                    raise HTTPException(404, "父票不存在")
+            path, _requested = _resolve_edge_path(conn, body, user)
             is_over, overweight = adjudicate_overload(
                 gross, float(lane["overload_threshold_t"])
             )
@@ -125,58 +187,110 @@ def create_ticket(body: TicketIn, authorization: AuthHeader = None):
                 status = "旁路挂起"
             else:
                 status = "已裁定"
-            cur = conn.execute(
-                """INSERT INTO weigh_tickets(ticket_code,lane_id,bl_ref,vehicle_plate,
-                   axle_weights,gross_t,generation,status,adjudicated_at,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    code,
-                    body.lane_id,
-                    body.bl_ref,
-                    body.vehicle_plate,
-                    json.dumps(axles, ensure_ascii=False),
-                    gross,
-                    1,
-                    status,
-                    now if status == "已裁定" else None,
-                    now,
-                ),
-            )
-            ticket_id = cur.lastrowid
-            if is_over:
-                hold_key = f"HOLD-{code}"
-                conn.execute(
-                    """INSERT INTO overload_holds(ticket_id,hold_key,overweight_t,threshold_t,
-                       status,opened_at,side_lane_note) VALUES (?,?,?,?,?,?,?)""",
+            ticket_id = None
+            edge_id = None
+            try:
+                cur = conn.execute(
+                    """INSERT INTO weigh_tickets(ticket_code,lane_id,bl_ref,vehicle_plate,
+                       axle_weights,gross_t,generation,parent_ticket_id,status,
+                       adjudicated_at,created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        ticket_id,
-                        hold_key,
-                        overweight,
-                        float(lane["overload_threshold_t"]),
-                        "开放",
+                        code,
+                        body.lane_id,
+                        body.bl_ref,
+                        body.vehicle_plate,
+                        json.dumps(axles, ensure_ascii=False),
+                        gross,
+                        1,
+                        parent_id,
+                        status,
+                        now if status == "已裁定" else None,
                         now,
-                        lane["side_lane_ref"] or "旁路待驳",
                     ),
                 )
-            write_audit(
-                conn,
-                user,
-                "ticket_weigh",
-                code,
-                {
-                    "ticket_id": ticket_id,
-                    "gross_t": gross,
-                    "status": status,
-                    "overload": is_over,
-                },
-            )
-            conn.commit()
-            return {
-                "id": ticket_id,
-                "ticket_code": code,
-                "gross_t": gross,
-                "status": status,
-                "overload": is_over,
-            }
-        finally:
-            release(conn, lock_key, user)
+                ticket_id = int(cur.lastrowid)
+                if parent_id is not None:
+                    if path == edge_write.PATH_JIA:
+                        edge_id = edge_write.write_ingest_edge(
+                            conn,
+                            parent_id,
+                            ticket_id,
+                            edge_type=body.edge_type,
+                            detail=body.edge_detail,
+                            actor=user,
+                        )
+                    else:
+                        edge_id = edge_write.write_shadow_edge(
+                            conn,
+                            parent_id,
+                            ticket_id,
+                            edge_type=body.edge_type,
+                            detail=body.edge_detail,
+                            actor=user,
+                        )
+                if is_over:
+                    hold_key = f"HOLD-{code}"
+                    conn.execute(
+                        """INSERT INTO overload_holds(ticket_id,hold_key,overweight_t,
+                           threshold_t,status,opened_at,side_lane_note)
+                           VALUES (?,?,?,?,?,?,?)""",
+                        (
+                            ticket_id,
+                            hold_key,
+                            overweight,
+                            float(lane["overload_threshold_t"]),
+                            "开放",
+                            now,
+                            lane["side_lane_ref"] or "旁路待驳",
+                        ),
+                    )
+                write_audit(
+                    conn,
+                    user,
+                    "ticket_weigh",
+                    code,
+                    {
+                        "ticket_id": ticket_id,
+                        "gross_t": gross,
+                        "status": status,
+                        "overload": is_over,
+                        "parent_ticket_id": parent_id,
+                        "edge_id": edge_id,
+                        "edge_path": path,
+                    },
+                )
+                conn.commit()
+            except (edge_write.EdgeWriteError, sqlite3.IntegrityError) as exc:
+                conn.rollback()
+                ticket_id = None
+                write_audit(
+                    conn,
+                    user,
+                    "写边拒收",
+                    code,
+                    {
+                        "reason": str(exc),
+                        "parent_ticket_id": parent_id,
+                        "rolled_back": True,
+                    },
+                )
+                conn.commit()
+                raise HTTPException(409, f"入库写边失败，整笔回滚：{exc}") from exc
+            except Exception:
+                conn.rollback()
+                raise
+            if ticket_id is None:
+                raise HTTPException(409, "入库写边失败，整笔回滚")
+        return {
+            "id": ticket_id,
+            "ticket_code": code,
+            "gross_t": gross,
+            "status": status,
+            "overload": is_over,
+            "parent_ticket_id": parent_id,
+            "edge_id": edge_id,
+            "edge_path": path,
+        }
+    finally:
+        release_business_locks(held, holder)

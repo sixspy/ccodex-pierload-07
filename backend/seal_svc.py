@@ -5,9 +5,10 @@ import json
 
 from fastapi import APIRouter, HTTPException
 
+import edge_write
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release, require_lock, session_holder
 from models import SealIn
 from validators import format_manifest, validate_ticket_sealable
 
@@ -19,18 +20,27 @@ def list_seals(authorization: AuthHeader = None):
     require_user(authorization)
     with connect() as conn:
         rows = conn.execute(
-            """SELECT s.*, t.ticket_code, t.vehicle_plate FROM gate_seals s
+            """SELECT s.*, t.ticket_code, t.vehicle_plate, t.parent_ticket_id
+               FROM gate_seals s
                JOIN weigh_tickets t ON t.id=s.ticket_id ORDER BY s.id DESC"""
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["lineage_complete"] = edge_write.ticket_lineage_complete(
+                conn, int(d["ticket_id"])
+            )
+            items.append(d)
+        return {"items": items}
 
 
 @router.post("/api/seals")
 def create_seal(body: SealIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
     lock_key = f"ticket:{body.ticket_id}"
+    holder = session_holder(user)
     with connect() as conn:
-        require_lock(conn, lock_key, user)
+        require_lock(conn, lock_key, holder, actor=user)
         try:
             ticket = conn.execute(
                 "SELECT * FROM weigh_tickets WHERE id=?", (body.ticket_id,)
@@ -46,6 +56,8 @@ def create_seal(body: SealIn, authorization: AuthHeader = None):
             ).fetchone()
             if open_hold:
                 raise HTTPException(409, "超重开放不得封闸")
+            if not edge_write.ticket_lineage_complete(conn, int(body.ticket_id)):
+                raise HTTPException(409, "血统不齐（断链或影子边未晋升）不得封闸")
             next_gen = int(ticket["generation"]) + 1
             manifest = body.manifest or format_manifest(
                 dict(ticket), float(ticket["gross_t"]), next_gen
@@ -81,7 +93,7 @@ def create_seal(body: SealIn, authorization: AuthHeader = None):
                 "status": "已封闸",
             }
         finally:
-            release(conn, lock_key, user)
+            release(conn, lock_key, holder)
 
 
 @router.get("/api/seals/{seal_ref}")
@@ -98,4 +110,7 @@ def get_seal(seal_ref: str, authorization: AuthHeader = None):
             raise HTTPException(404, "快照不存在")
         data = dict(row)
         data["axle_weights"] = json.loads(data["axle_weights"] or "[]")
+        data["lineage_complete"] = edge_write.ticket_lineage_complete(
+            conn, int(row["ticket_id"])
+        )
         return data

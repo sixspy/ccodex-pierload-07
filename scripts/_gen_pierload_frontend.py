@@ -211,6 +211,12 @@ textarea { min-height: 80px; font-family: var(--font-mono); font-size: 12px; }
 input:focus, select:focus, textarea:focus {
   outline: 1px solid var(--amber); outline-offset: 1px;
 }
+
+/* 对账页辅助：偏差行高亮 */
+.recon-warn { color: var(--warn); font-weight: 600; }
+.recon-ok { color: var(--ok); }
+.table-wrap { overflow-x: auto; max-width: 100%; }
+.harbor-main .panel + .panel { margin-top: 14px; }
 """
 
 DASH = r"""
@@ -234,7 +240,7 @@ BRIDGES = r"""
 export const bridgesViewTemplate = `
 <section class="panel">
   <h2>地磅桥登记</h2>
-  <p class="hint">登记港区地磅额定毛重与轴数上限，供车道阈值引用。</p>
+  <p class="hint">登记港区地磅额定毛重与轴数上限，供车道阈值引用；地磅页同步血统口径。</p>
   <div class="form-row">
     <div><label>地磅编码</label><input v-model="bridgeForm.bridge_code"/></div>
     <div><label>港区</label><input v-model="bridgeForm.pier_zone"/></div>
@@ -263,15 +269,28 @@ export const bridgesViewTemplate = `
   <div v-if="bridgeDetail" class="detail-box">
     <h3>{{ bridgeDetail.bridge.name }} · {{ bridgeDetail.bridge.bridge_code }}</h3>
     <p>在港票 {{ bridgeDetail.active_tickets }} · 车道 {{ bridgeDetail.lanes.length }} 条</p>
+    <p>
+      血统
+      <span class="badge" :class="bridgeDetail.lineage && bridgeDetail.lineage.lineage_complete ? 'pass' : 'fail'">
+        {{ bridgeDetail.lineage && bridgeDetail.lineage.lineage_complete ? '齐全' : '断链' }}
+      </span>
+      <span v-if="bridgeDetail.lineage && bridgeDetail.lineage.broken_tickets.length" class="recon-warn">
+        {{ bridgeDetail.lineage.broken_tickets.join('、') }}
+      </span>
+    </p>
   </div>
 </section>
-`;"""
+`;
+"""
 
 TICKETS = r"""
 export const ticketsViewTemplate = `
 <section class="panel">
   <h2>过磅票采集</h2>
-  <p class="hint">录入各轴重 JSON；超重自动旁路挂起并开超重记录。</p>
+  <p class="hint">
+    录入各轴重 JSON；超重自动旁路挂起并开超重记录。
+    续磅票须选父票，入库即按当班命运册路径同写血缘边；断链票不得封闸出证。
+  </p>
   <div class="form-row">
     <div><label>车道</label>
       <select v-model.number="ticketForm.lane_id">
@@ -285,6 +304,13 @@ export const ticketsViewTemplate = `
     </div>
     <div><label>车牌</label><input v-model="ticketForm.vehicle_plate"/></div>
     <div><label>票号(可空)</label><input v-model="ticketForm.ticket_code"/></div>
+    <div><label>父票(续磅才选)</label>
+      <select v-model="ticketForm.parent_ticket_id">
+        <option :value="null">— 非续磅 —</option>
+        <option v-for="t in tickets" :key="t.id" :value="t.id">{{ t.ticket_code }}</option>
+      </select>
+    </div>
+    <div><label>边类型</label><input v-model="ticketForm.edge_type"/></div>
   </div>
   <label>轴重 JSON</label>
   <textarea v-model="ticketForm.axles_json" rows="4" placeholder='[{"axle":1,"w":8.2}]'></textarea>
@@ -292,8 +318,13 @@ export const ticketsViewTemplate = `
     <button @click="createTicket">过磅入闸</button>
     <button class="secondary" @click="refresh">刷新</button>
   </div>
+  <p v-if="fateBook" class="hint">
+    当班写边路径
+    <span class="badge pass">{{ fateBook.locked_path === '甲' ? '甲 · 同事务写正式边' : '乙 · 影子待晋升' }}</span>
+    —— 偏离路径的写边一律记偏航并拒写。
+  </p>
   <table class="data-table">
-    <thead><tr><th>票号</th><th>车道</th><th>提单</th><th>毛重</th><th>状态</th><th>代</th><th></th></tr></thead>
+    <thead><tr><th>票号</th><th>车道</th><th>提单</th><th>毛重</th><th>状态</th><th>代</th><th>血统</th><th></th></tr></thead>
     <tbody>
       <tr v-for="t in tickets" :key="t.id" @click="selectTicket(t)">
         <td>{{ t.ticket_code }}</td>
@@ -302,15 +333,31 @@ export const ticketsViewTemplate = `
         <td>{{ fmtT(t.gross_t) }}</td>
         <td><span class="badge" :class="ticketClass(t.status)">{{ t.status }}</span></td>
         <td>{{ t.generation }}</td>
+        <td>
+          <span class="badge" :class="t.lineage_complete ? 'pass' : 'fail'">
+            {{ t.lineage_complete ? '齐全' : '断链' }}
+          </span>
+          <span v-if="t.parent_ticket_id" class="mono"> 父#{{ t.parent_ticket_id }}</span>
+        </td>
         <td><button class="mini-btn" @click.stop="loadTicketDetail(t.id)">详情</button></td>
       </tr>
     </tbody>
   </table>
   <div v-if="ticketDetail" class="detail-box">
     <p>车牌 {{ ticketDetail.ticket.vehicle_plate }} · 超重挂起 {{ ticketDetail.overload_holds.length }} 条</p>
+    <p>
+      血统
+      <span class="badge" :class="ticketDetail.lineage && ticketDetail.lineage.lineage_complete ? 'pass' : 'fail'">
+        {{ ticketDetail.lineage && ticketDetail.lineage.lineage_complete ? '齐全' : '断链' }}
+      </span>
+      <span v-if="ticketDetail.lineage && ticketDetail.lineage.reason" class="recon-warn">
+        {{ ticketDetail.lineage.reason }}
+      </span>
+    </p>
   </div>
 </section>
-`;"""
+`;
+"""
 
 OVERLOAD = r"""
 export const overloadViewTemplate = `
@@ -383,7 +430,9 @@ SEAL = r"""
 export const sealViewTemplate = `
 <section class="panel">
   <h2>闸代快照</h2>
-  <p class="hint">封闸升代并写入清单摘要，供提单册对账引用。</p>
+  <p class="hint">
+    封闸升代并写入清单摘要，供提单册对账引用；血统断链或影子边未晋升的票不得封闸。
+  </p>
   <div class="form-row">
     <div><label>过磅票</label>
       <select v-model.number="sealForm.ticket_id">
@@ -397,19 +446,25 @@ export const sealViewTemplate = `
     <button class="secondary" @click="refresh">刷新</button>
   </div>
   <table class="data-table">
-    <thead><tr><th>快照号</th><th>票号</th><th>闸代</th><th>清单摘要</th><th>状态</th></tr></thead>
+    <thead><tr><th>快照号</th><th>票号</th><th>闸代</th><th>清单摘要</th><th>血统</th><th>状态</th></tr></thead>
     <tbody>
       <tr v-for="s in seals" :key="s.id">
         <td>{{ s.seal_ref }}</td>
         <td>{{ s.ticket_code }}</td>
         <td>{{ s.ticket_generation }}</td>
         <td class="mono">{{ shortText(s.manifest) }}</td>
+        <td>
+          <span class="badge" :class="s.lineage_complete ? 'pass' : 'fail'">
+            {{ s.lineage_complete ? '齐全' : '断链' }}
+          </span>
+        </td>
         <td><span class="badge pass">{{ s.status }}</span></td>
       </tr>
     </tbody>
   </table>
 </section>
-`;"""
+`;
+"""
 
 BL = r"""
 export const blViewTemplate = `
@@ -445,7 +500,27 @@ LINEAGE = r"""
 export const lineageViewTemplate = `
 <section class="panel">
   <h2>轴重血缘</h2>
-  <p class="hint">记录驳载分票、二次过磅等轴重血缘边。</p>
+  <p class="hint">
+    正式链与影子连边草稿分离：影子边只是“待校验”，晋升后才计入正式血统；
+    断链票在过磅、对账、快照、地磅四页同口径可见。
+  </p>
+  <div v-if="fateBook" class="detail-box">
+    <p>
+      当班写边路径
+      <span class="badge pass">{{ fateBook.locked_path === '甲' ? '甲 · 落票同事务写正式边' : '乙 · 影子草稿待校验晋升' }}</span>
+    </p>
+    <p class="hint">{{ fateBook.note }}</p>
+    <p class="hint">锁定 {{ fateBook.locked_by }} · {{ fateBook.locked_at }}</p>
+  </div>
+  <div v-if="lineageIntegrity" class="hero-cards">
+    <div class="hero-card"><span class="t">在册票</span><div class="n">{{ lineageIntegrity.tickets_total }}</div></div>
+    <div class="hero-card"><span class="t">正式边</span><div class="n">{{ lineageIntegrity.formal_edges }}</div></div>
+    <div class="hero-card"><span class="t">影子待校验</span><div class="n">{{ lineageIntegrity.shadow_edges }}</div></div>
+    <div class="hero-card"><span class="t">断链票</span><div class="n" :class="lineageIntegrity.broken_count ? 'recon-warn' : 'recon-ok'">{{ lineageIntegrity.broken_count }}</div></div>
+  </div>
+  <p v-if="lineageIntegrity && lineageIntegrity.broken_tickets.length" class="recon-warn">
+    断链：{{ lineageIntegrity.broken_tickets.join('、') }}
+  </p>
   <div class="form-row">
     <div><label>起点票</label>
       <select v-model.number="lineageForm.from_ticket_id">
@@ -462,29 +537,38 @@ export const lineageViewTemplate = `
     <div><label>说明</label><input v-model="lineageForm.detail"/></div>
   </div>
   <div class="actions">
-    <button @click="addLineage">登记边</button>
+    <button @click="addLineage">登记影子草稿</button>
     <button class="secondary" @click="refresh">刷新</button>
   </div>
   <table class="data-table">
-    <thead><tr><th>自</th><th>至</th><th>类型</th><th>说明</th></tr></thead>
+    <thead><tr><th>自</th><th>至</th><th>类型</th><th>边态</th><th>说明</th><th></th></tr></thead>
     <tbody>
       <tr v-for="e in lineageEdges" :key="e.id">
         <td>{{ e.from_code || e.from_ticket_id }}</td>
         <td>{{ e.to_code || '—' }}</td>
         <td>{{ e.edge_type }}</td>
+        <td>
+          <span class="badge" :class="e.edge_status === '正式' ? 'pass' : 'warn'">
+            {{ e.edge_status === '正式' ? '正式链' : '影子 · 待校验' }}
+          </span>
+        </td>
         <td>{{ e.detail }}</td>
+        <td>
+          <button v-if="e.edge_status !== '正式'" class="mini-btn" @click="promoteEdge(e.id)">晋升正式</button>
+        </td>
       </tr>
     </tbody>
   </table>
 </section>
-`;"""
+`;
+"""
 
 RECON = r"""
 export const reconcileViewTemplate = `
 <section class="grid-2">
   <section class="panel">
     <h2>提单对账</h2>
-    <p class="hint">汇总过磅毛重与提单申报吨比对。</p>
+    <p class="hint">汇总过磅毛重与提单申报吨比对；金额、血统、快照三者同态方可出证。</p>
     <div class="form-row">
       <div><label>提单号</label><input v-model="reconCode"/></div>
     </div>
@@ -494,26 +578,50 @@ export const reconcileViewTemplate = `
     </div>
     <div v-if="reconOne" class="detail-box">
       <p>申报 {{ reconOne.declared_gross_t }}t · 过磅合计 {{ reconOne.ticket_sum_t }}t</p>
-      <p :class="reconOne.balanced ? 'ok' : 'bad'">{{ reconOne.balanced ? '账实平衡' : '偏差待查' }}</p>
-      <p>快照数 {{ reconOne.seal_count }} · 可出证明 {{ reconOne.proof_ready ? '是' : '否' }}</p>
+      <p :class="reconOne.balanced ? 'recon-ok' : 'recon-warn'">{{ reconOne.balanced ? '账实平衡' : '偏差待查' }}</p>
+      <p :class="reconOne.lineage_complete ? 'recon-ok' : 'recon-warn'">
+        血统 {{ reconOne.lineage_complete ? '齐全' : '断链' }}
+        <span v-if="!reconOne.lineage_complete">：{{ (reconOne.broken_tickets || []).join('、') }}</span>
+      </p>
+      <p>快照数 {{ reconOne.seal_count }} · 可出证明
+        <span :class="reconOne.proof_ready ? 'recon-ok' : 'recon-warn'">{{ reconOne.proof_ready ? '是' : '否' }}</span>
+      </p>
+    </div>
+    <div v-if="lineageIntegrity" class="detail-box">
+      <p>
+        全港血统
+        <span class="badge" :class="lineageIntegrity.broken_count ? 'fail' : 'pass'">
+          {{ lineageIntegrity.broken_count ? '断链 ' + lineageIntegrity.broken_count : '齐全' }}
+        </span>
+        · 正式边 {{ lineageIntegrity.formal_edges }} · 影子待校验 {{ lineageIntegrity.shadow_edges }}
+      </p>
     </div>
     <ul v-if="reconAllItems.length">
-      <li v-for="r in reconAllItems" :key="r.bl_code">{{ r.bl_code }} · {{ r.balanced ? '平' : '偏' }}</li>
+      <li v-for="r in reconAllItems" :key="r.bl_code">
+        {{ r.bl_code }} ·
+        <span :class="r.balanced ? 'recon-ok' : 'recon-warn'">{{ r.balanced ? '平' : '偏' }}</span>
+        ·
+        <span :class="r.lineage_complete ? 'recon-ok' : 'recon-warn'">{{ r.lineage_complete ? '血统齐' : '血统断' }}</span>
+      </li>
     </ul>
   </section>
   <section class="panel">
     <h2>单票证明</h2>
     <div class="form-row"><div><label>票号</label><input v-model="proofCode"/></div></div>
-    <motion class="actions"><button @click="loadProof">拉证明</button></motion>
+    <div class="actions"><button @click="loadProof">拉证明</button></div>
     <div v-if="proofOne" class="detail-box">
       <p>提单匹配 {{ proofOne.manifest_matches_bl ? '是' : '否' }}</p>
       <p>超重闭环 {{ proofOne.overload_closed ? '是' : '否' }}</p>
       <p>已放行 {{ proofOne.released ? '是' : '否' }}</p>
-      <p>一致 {{ proofOne.coherent ? '是' : '否' }}</p>
+      <p :class="proofOne.lineage_complete ? 'recon-ok' : 'recon-warn'">
+        血缘齐全 {{ proofOne.lineage_complete ? '是' : '否' }}
+      </p>
+      <p :class="proofOne.coherent ? 'recon-ok' : 'recon-warn'">一致 {{ proofOne.coherent ? '是' : '否' }}</p>
     </div>
   </section>
 </section>
-`;"""
+`;
+"""
 
 STUBS = r"""
 export const stubsViewTemplate = `
@@ -583,6 +691,9 @@ export function createApi(getToken, onUnauthorized) {
     registerBl: (d) => req("/api/bl", { method: "POST", body: JSON.stringify(d) }),
     lineage: () => req("/api/lineage"),
     addLineage: (d) => req("/api/lineage", { method: "POST", body: JSON.stringify(d) }),
+    lineageIntegrity: () => req("/api/lineage/integrity"),
+    lineageFateBook: () => req("/api/lineage/fate-book"),
+    promoteLineage: (id) => req(`/api/lineage/${id}/promote`, { method: "POST" }),
     reconcileAll: () => req("/api/reconcile"),
     reconcileOne: (code) => req(`/api/reconcile/${encodeURIComponent(code)}`),
     proofTicket: (code) => req(`/api/proof/ticket/${encodeURIComponent(code)}`),
@@ -632,6 +743,8 @@ createApp({
     const seals = ref([]);
     const blList = ref([]);
     const lineageEdges = ref([]);
+    const lineageIntegrity = ref(null);
+    const fateBook = ref(null);
     const customsJobs = ref([]);
     const craneJobs = ref([]);
     const bridgeDetail = ref(null);
@@ -652,7 +765,8 @@ createApp({
     });
     const ticketForm = ref({
       lane_id: 1, bl_ref: "BL-2026-0101", vehicle_plate: "沪A·试0001",
-      ticket_code: "", axles_json: '[{"axle":1,"w":9},{"axle":2,"w":11},{"axle":3,"w":10}]',
+      ticket_code: "", parent_ticket_id: null, edge_type: "续磅",
+      axles_json: '[{"axle":1,"w":9},{"axle":2,"w":11},{"axle":3,"w":10}]',
     });
     const overloadOpenForm = ref({ ticket_id: 0, side_lane_note: "" });
     const gateForm = ref({ ticket_id: 0, officer: "闸口值班" });
@@ -724,10 +838,11 @@ createApp({
       if (!token.value) return;
       clearFlash();
       try {
-        const [d, br, ln, tk, ov, gr, sl, bl, lg, cj, cj2] = await Promise.all([
+        const [d, br, ln, tk, ov, gr, sl, bl, lg, cj, cj2, li, fb] = await Promise.all([
           api.dashboard(), api.bridges(), api.lanes(), api.tickets(), api.overloads(),
           api.gateReleases(), api.seals(), api.blList(), api.lineage(),
-          api.customsJobs(), api.craneJobs(),
+          api.customsJobs(), api.craneJobs(), api.lineageIntegrity(),
+          api.lineageFateBook(),
         ]);
         dash.value = d || {};
         bridges.value = br.items || [];
@@ -738,6 +853,8 @@ createApp({
         seals.value = sl.items || [];
         blList.value = bl.items || [];
         lineageEdges.value = lg.items || [];
+        lineageIntegrity.value = li || null;
+        fateBook.value = fb || null;
         customsJobs.value = cj.items || [];
         craneJobs.value = cj2.items || [];
         if (bridges.value.length) {
@@ -780,8 +897,15 @@ createApp({
           axle_weights: axles,
         };
         if (ticketForm.value.ticket_code) payload.ticket_code = ticketForm.value.ticket_code;
+        if (ticketForm.value.parent_ticket_id) {
+          payload.parent_ticket_id = ticketForm.value.parent_ticket_id;
+          payload.edge_type = ticketForm.value.edge_type || "续磅";
+        }
         const r = await api.createTicket(payload);
-        flashOk(`过磅完成：${r.status}${r.overload ? "（超重）" : ""}`);
+        flashOk(
+          `过磅完成：${r.status}${r.overload ? "（超重）" : ""}` +
+          (r.edge_id ? ` · 血缘边#${r.edge_id}(${r.edge_path})` : "")
+        );
         await refresh();
       } catch (e) { flashErr(e); }
     }
@@ -824,7 +948,16 @@ createApp({
     }
     async function addLineage() {
       clearFlash();
-      try { await api.addLineage(lineageForm.value); flashOk("血缘边已记"); await refresh(); }
+      try {
+        await api.addLineage({ ...lineageForm.value, edge_status: "影子" });
+        flashOk("影子连边已记，待校验后晋升");
+        await refresh();
+      }
+      catch (e) { flashErr(e); }
+    }
+    async function promoteEdge(edgeId) {
+      clearFlash();
+      try { await api.promoteLineage(edgeId); flashOk("影子连边已晋升正式"); await refresh(); }
       catch (e) { flashErr(e); }
     }
     async function loadReconcile() {
@@ -853,12 +986,6 @@ createApp({
       catch (e) { flashErr(e); }
     }
 
-    const viewMap = [
-      dashboardViewTemplate, bridgesViewTemplate, lanesViewTemplate, ticketsViewTemplate,
-      overloadViewTemplate, gateViewTemplate, sealViewTemplate, blViewTemplate,
-      lineageViewTemplate, reconcileViewTemplate, stubsViewTemplate,
-    ];
-
     onMounted(() => {
       if (token.value) refresh();
     });
@@ -866,47 +993,49 @@ createApp({
     return {
       token, user, username, password, err, actionErr, actionOk, tab, nav,
       dash, bridges, lanes, tickets, overloads, gateReleases, seals, blList,
-      lineageEdges, customsJobs, craneJobs, bridgeDetail, ticketDetail,
+      lineageEdges, lineageIntegrity, fateBook, customsJobs, craneJobs,
+      bridgeDetail, ticketDetail,
       reconOne, reconAllItems, proofOne, reconCode, proofCode,
       bridgeForm, laneForm, ticketForm, overloadOpenForm, gateForm, sealForm,
       blForm, lineageForm, customsForm, craneForm,
       adjudicableTickets, releasableTickets, sealableTickets,
-      login, logout, refresh, viewMap,
+      login, logout, refresh,
       fmtT, ticketClass, shortText,
       createBridge, loadBridgeDetail, createLane, createTicket, loadTicketDetail, selectTicket,
       openOverload, closeOverload, releaseGate, createSeal, registerBl, addLineage,
+      promoteEdge,
       loadReconcile, loadAllReconcile, loadProof, enqueueCustoms, enqueueCrane,
     };
   },
   template: `
-    <motion v-if="!token" class="login-hero">
-      <UploadLogin class="login-card">
+    <div v-if="!token" class="login-hero">
+      <div class="login-card">
         <h1>港口过磅闸口</h1>
         <p class="sub">过磅票入闸后裁定超重才放行，驳回进旁路挂起，闸代快照与提单册对账。</p>
         <label>账号</label><input v-model="username"/>
         <label>密码</label><input v-model="password" type="password"/>
         <button @click="login">登录</button>
         <p v-if="err" class="err">{{ err }}</p>
-      </UploadLogin>
-    </motion>
-    <motion v-else class="harbor-shell">
+      </div>
+    </div>
+    <div v-else class="harbor-shell">
       <header class="harbor-top">
-        <motion style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:16px;width:100%">
-          <motion>
+        <div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:16px;width:100%">
+          <div>
             <h1>港口过磅闸口</h1>
             <p class="tagline">数据工程 · 港区地磅闸口裁定</p>
-          </motion>
-          <motion class="stat-strip">
+          </div>
+          <div class="stat-strip">
             <span class="stat-pill">超重<strong>{{ dash.open_overloads ?? 0 }}</strong></span>
             <span class="stat-pill">旁路<strong>{{ dash.side_pending ?? 0 }}</strong></span>
             <span class="stat-pill">在港票<strong>{{ dash.tickets ?? 0 }}</strong></span>
-          </motion>
-          <motion class="top-actions">
+          </div>
+          <div class="top-actions">
             <span>{{ user }}</span>
             <button @click="refresh">刷新</button>
             <button @click="logout">退出</button>
-          </motion>
-        </motion>
+          </div>
+        </div>
       </header>
       <nav class="tab-strip">
         <button v-for="(n,i) in nav" :key="n" :class="{active: tab===i}" @click="tab=i">{{ n }}</button>
@@ -914,9 +1043,19 @@ createApp({
       <main class="harbor-main">
         <p v-if="actionErr" class="action-err">{{ actionErr }}</p>
         <p v-if="actionOk" class="ok-msg">{{ actionOk }}</p>
-        <component :is="{ template: viewMap[tab] }" />
+        <div v-show="tab===0">${dashboardViewTemplate}</div>
+        <div v-show="tab===1">${bridgesViewTemplate}</div>
+        <div v-show="tab===2">${lanesViewTemplate}</div>
+        <div v-show="tab===3">${ticketsViewTemplate}</div>
+        <div v-show="tab===4">${overloadViewTemplate}</div>
+        <div v-show="tab===5">${gateViewTemplate}</div>
+        <div v-show="tab===6">${sealViewTemplate}</div>
+        <div v-show="tab===7">${blViewTemplate}</div>
+        <div v-show="tab===8">${lineageViewTemplate}</div>
+        <div v-show="tab===9">${reconcileViewTemplate}</div>
+        <div v-show="tab===10">${stubsViewTemplate}</div>
       </main>
-    </motion>
+    </div>
   `,
 }).mount("#app");
 """

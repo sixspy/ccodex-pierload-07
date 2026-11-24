@@ -1,0 +1,36 @@
+{
+  "case": "写边案庚",
+  "description": "入库已成功落正式票行、但轴重血缘边表为空行的假绿夹具",
+  "ticket_code": "PL-G41",
+  "parent_ticket_code": "WT-LN-N-01-IN-001",
+  "lane_code": "LN-N-01-IN",
+  "bl_ref": "BL-2026-G41",
+  "bl_declared_gross_t": 0.4,
+  "vehicle_plate": "沪A·G41",
+  "axle_weights": [
+    {"axle": 1, "w": 0.2},
+    {"axle": 2, "w": 0.2}
+  ],
+  "gross_t": 0.4,
+  "generation": 1,
+  "status": "已裁定",
+  "seal_ref": "GS-PL-G41-G1",
+  "seal_manifest": "票号=PL-G41;提单=BL-2026-G41;车牌=沪A·G41;毛重=0.4t;闸代=1",
+  "required_edge": {
+    "from_ticket_code": "WT-LN-N-01-IN-001",
+    "to_ticket_code": "PL-G41",
+    "edge_type": "续磅"
+  },
+  "expected_if_write_edge_present": {
+    "axle_lineage_rows": 1,
+    "lineage_complete": true,
+    "reconcile_proof_ready": true,
+    "hi_hi_consistent": true
+  },
+  "observed_false_green": {
+    "axle_lineage_rows": 0,
+    "reconcile_proof_ready": true,
+    "lineage_complete_field": "缺失",
+    "lineage_page_chain_broken": true
+  }
+}

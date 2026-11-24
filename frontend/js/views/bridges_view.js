@@ -1,7 +1,7 @@
 export const bridgesViewTemplate = `
 <section class="panel">
   <h2>地磅桥登记</h2>
-  <p class="hint">登记港区地磅额定毛重与轴数上限，供车道阈值引用。</p>
+  <p class="hint">登记港区地磅额定毛重与轴数上限，供车道阈值引用；地磅页同步血统口径。</p>
   <div class="form-row">
     <div><label>地磅编码</label><input v-model="bridgeForm.bridge_code"/></div>
     <div><label>港区</label><input v-model="bridgeForm.pier_zone"/></div>
@@ -30,6 +30,15 @@ export const bridgesViewTemplate = `
   <div v-if="bridgeDetail" class="detail-box">
     <h3>{{ bridgeDetail.bridge.name }} · {{ bridgeDetail.bridge.bridge_code }}</h3>
     <p>在港票 {{ bridgeDetail.active_tickets }} · 车道 {{ bridgeDetail.lanes.length }} 条</p>
+    <p>
+      血统
+      <span class="badge" :class="bridgeDetail.lineage && bridgeDetail.lineage.lineage_complete ? 'pass' : 'fail'">
+        {{ bridgeDetail.lineage && bridgeDetail.lineage.lineage_complete ? '齐全' : '断链' }}
+      </span>
+      <span v-if="bridgeDetail.lineage && bridgeDetail.lineage.broken_tickets.length" class="recon-warn">
+        {{ bridgeDetail.lineage.broken_tickets.join('、') }}
+      </span>
+    </p>
   </div>
 </section>
 `;

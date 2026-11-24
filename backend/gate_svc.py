@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release, require_lock, session_holder
 from models import GateReleaseIn
 from validators import validate_no_open_overload, validate_ticket_mutable
 
@@ -30,8 +30,9 @@ def list_releases(authorization: AuthHeader = None):
 def release_gate(body: GateReleaseIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
     lock_key = f"gate:{body.ticket_id}"
+    holder = session_holder(user)
     with connect() as conn:
-        require_lock(conn, lock_key, user)
+        require_lock(conn, lock_key, holder, actor=user)
         try:
             ticket = conn.execute(
                 """SELECT t.*, l.id lane_id FROM weigh_tickets t
@@ -84,4 +85,4 @@ def release_gate(body: GateReleaseIn, authorization: AuthHeader = None):
                 "status": "已放行",
             }
         finally:
-            release(conn, lock_key, user)
+            release(conn, lock_key, holder)

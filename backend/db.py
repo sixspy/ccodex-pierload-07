@@ -87,10 +87,12 @@ CREATE TABLE IF NOT EXISTS weigh_tickets(
   axle_weights TEXT NOT NULL,
   gross_t REAL NOT NULL,
   generation INTEGER NOT NULL DEFAULT 1,
+  parent_ticket_id INTEGER,
   status TEXT NOT NULL,
   adjudicated_at TEXT,
   created_at TEXT NOT NULL,
-  FOREIGN KEY(lane_id) REFERENCES weigh_lanes(id)
+  FOREIGN KEY(lane_id) REFERENCES weigh_lanes(id),
+  FOREIGN KEY(parent_ticket_id) REFERENCES weigh_tickets(id)
 );
 CREATE TABLE IF NOT EXISTS overload_holds(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,8 +142,17 @@ CREATE TABLE IF NOT EXISTS axle_lineage(
   to_ticket_id INTEGER,
   edge_type TEXT NOT NULL,
   detail TEXT NOT NULL,
+  edge_status TEXT NOT NULL DEFAULT '正式',
   created_at TEXT NOT NULL,
   FOREIGN KEY(from_ticket_id) REFERENCES weigh_tickets(id)
+);
+CREATE TABLE IF NOT EXISTS write_fate_book(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT UNIQUE NOT NULL,
+  locked_path TEXT NOT NULL,
+  note TEXT NOT NULL,
+  locked_by TEXT NOT NULL,
+  locked_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pier_locks(
   lock_key TEXT PRIMARY KEY,
@@ -436,9 +447,79 @@ def seed_lineage_samples(conn: sqlite3.Connection) -> None:
         )
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """旧库补列：票父链、边态；并回填默认值。"""
+    if "parent_ticket_id" not in _columns(conn, "weigh_tickets"):
+        conn.execute(
+            "ALTER TABLE weigh_tickets ADD COLUMN parent_ticket_id INTEGER"
+        )
+    if "edge_status" not in _columns(conn, "axle_lineage"):
+        conn.execute(
+            """ALTER TABLE axle_lineage
+               ADD COLUMN edge_status TEXT NOT NULL DEFAULT '正式'"""
+        )
+    conn.execute(
+        """UPDATE axle_lineage SET edge_status='正式'
+           WHERE edge_status IS NULL OR edge_status=''"""
+    )
+    # 旧库可能已有重复正式边；保留最早一条，其余降为影子待校验（不删数据）
+    dupes = conn.execute(
+        """SELECT id, from_ticket_id, to_ticket_id, edge_type,
+                  MIN(id) OVER (
+                    PARTITION BY from_ticket_id,to_ticket_id,edge_type
+                  ) keeper
+           FROM axle_lineage WHERE edge_status='正式'"""
+    ).fetchall()
+    for row in dupes:
+        if row["id"] != row["keeper"]:
+            conn.execute(
+                """UPDATE axle_lineage SET edge_status='影子',
+                   detail=detail || '（迁移去重：待校验）' WHERE id=?""",
+                (row["id"],),
+            )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS ux_axle_lineage_formal
+           ON axle_lineage(from_ticket_id,to_ticket_id,edge_type)
+           WHERE edge_status='正式'"""
+    )
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_axle_lineage_to
+           ON axle_lineage(to_ticket_id, edge_status)"""
+    )
+
+
+FATE_SCOPE = "港区写边命运册"
+FATE_LOCKED_PATH = "甲"
+
+
+def seed_fate_book(conn: sqlite3.Connection) -> None:
+    """写入当班命运册：甲路径锁死。已有当班记录则不覆盖。"""
+    if conn.execute(
+        "SELECT id FROM write_fate_book WHERE scope=?", (FATE_SCOPE,)
+    ).fetchone():
+        return
+    conn.execute(
+        """INSERT INTO write_fate_book(scope,locked_path,note,locked_by,locked_at)
+           VALUES (?,?,?,?,?)""",
+        (
+            FATE_SCOPE,
+            FATE_LOCKED_PATH,
+            "入库票落正式行与正式血缘边同事务；边零增整笔回滚拒收。"
+            "禁止折中双写；偏离本册记写边偏航并拒写。",
+            "system",
+            now_iso(),
+        ),
+    )
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        migrate(conn)
         seed_users(conn)
         seed_bridges(conn)
         seed_lanes(conn)
@@ -448,6 +529,7 @@ def init_db() -> None:
         seed_gate_samples(conn)
         seed_seals_sample(conn)
         seed_lineage_samples(conn)
+        seed_fate_book(conn)
         conn.commit()
 
 

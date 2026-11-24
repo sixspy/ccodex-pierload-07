@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release, require_lock, session_holder
 from models import OverloadCloseIn, OverloadOpenIn
 from validators import adjudicate_overload, validate_ticket_mutable
 
@@ -31,8 +31,9 @@ def list_overloads(authorization: AuthHeader = None, status: str | None = None):
 def open_overload(body: OverloadOpenIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
     lock_key = f"ticket:{body.ticket_id}"
+    holder = session_holder(user)
     with connect() as conn:
-        require_lock(conn, lock_key, user)
+        require_lock(conn, lock_key, holder, actor=user)
         try:
             ticket = conn.execute(
                 """SELECT t.*, l.overload_threshold_t FROM weigh_tickets t
@@ -88,7 +89,7 @@ def open_overload(body: OverloadOpenIn, authorization: AuthHeader = None):
                 "status": "开放",
             }
         finally:
-            release(conn, lock_key, user)
+            release(conn, lock_key, holder)
 
 
 @router.post("/api/overloads/close")
@@ -103,7 +104,8 @@ def close_overload(body: OverloadCloseIn, authorization: AuthHeader = None):
         if hold["status"] != "开放":
             raise HTTPException(409, "挂起已关闭")
         lock_key = f"ticket:{hold['ticket_id']}"
-        require_lock(conn, lock_key, user)
+        holder = session_holder(user)
+        require_lock(conn, lock_key, holder, actor=user)
         try:
             now = now_iso()
             conn.execute(
@@ -126,4 +128,4 @@ def close_overload(body: OverloadCloseIn, authorization: AuthHeader = None):
             conn.commit()
             return {"ok": True, "hold_id": body.hold_id, "ticket_adjudicated": not open_left}
         finally:
-            release(conn, lock_key, user)
+            release(conn, lock_key, holder)

@@ -34,6 +34,8 @@ createApp({
     const seals = ref([]);
     const blList = ref([]);
     const lineageEdges = ref([]);
+    const lineageIntegrity = ref(null);
+    const fateBook = ref(null);
     const customsJobs = ref([]);
     const craneJobs = ref([]);
     const bridgeDetail = ref(null);
@@ -54,7 +56,8 @@ createApp({
     });
     const ticketForm = ref({
       lane_id: 1, bl_ref: "BL-2026-0101", vehicle_plate: "沪A·试0001",
-      ticket_code: "", axles_json: '[{"axle":1,"w":9},{"axle":2,"w":11},{"axle":3,"w":10}]',
+      ticket_code: "", parent_ticket_id: null, edge_type: "续磅",
+      axles_json: '[{"axle":1,"w":9},{"axle":2,"w":11},{"axle":3,"w":10}]',
     });
     const overloadOpenForm = ref({ ticket_id: 0, side_lane_note: "" });
     const gateForm = ref({ ticket_id: 0, officer: "闸口值班" });
@@ -126,10 +129,11 @@ createApp({
       if (!token.value) return;
       clearFlash();
       try {
-        const [d, br, ln, tk, ov, gr, sl, bl, lg, cj, cj2] = await Promise.all([
+        const [d, br, ln, tk, ov, gr, sl, bl, lg, cj, cj2, li, fb] = await Promise.all([
           api.dashboard(), api.bridges(), api.lanes(), api.tickets(), api.overloads(),
           api.gateReleases(), api.seals(), api.blList(), api.lineage(),
-          api.customsJobs(), api.craneJobs(),
+          api.customsJobs(), api.craneJobs(), api.lineageIntegrity(),
+          api.lineageFateBook(),
         ]);
         dash.value = d || {};
         bridges.value = br.items || [];
@@ -140,6 +144,8 @@ createApp({
         seals.value = sl.items || [];
         blList.value = bl.items || [];
         lineageEdges.value = lg.items || [];
+        lineageIntegrity.value = li || null;
+        fateBook.value = fb || null;
         customsJobs.value = cj.items || [];
         craneJobs.value = cj2.items || [];
         if (bridges.value.length) {
@@ -182,8 +188,15 @@ createApp({
           axle_weights: axles,
         };
         if (ticketForm.value.ticket_code) payload.ticket_code = ticketForm.value.ticket_code;
+        if (ticketForm.value.parent_ticket_id) {
+          payload.parent_ticket_id = ticketForm.value.parent_ticket_id;
+          payload.edge_type = ticketForm.value.edge_type || "续磅";
+        }
         const r = await api.createTicket(payload);
-        flashOk(`过磅完成：${r.status}${r.overload ? "（超重）" : ""}`);
+        flashOk(
+          `过磅完成：${r.status}${r.overload ? "（超重）" : ""}` +
+          (r.edge_id ? ` · 血缘边#${r.edge_id}(${r.edge_path})` : "")
+        );
         await refresh();
       } catch (e) { flashErr(e); }
     }
@@ -226,7 +239,16 @@ createApp({
     }
     async function addLineage() {
       clearFlash();
-      try { await api.addLineage(lineageForm.value); flashOk("血缘边已记"); await refresh(); }
+      try {
+        await api.addLineage({ ...lineageForm.value, edge_status: "影子" });
+        flashOk("影子连边已记，待校验后晋升");
+        await refresh();
+      }
+      catch (e) { flashErr(e); }
+    }
+    async function promoteEdge(edgeId) {
+      clearFlash();
+      try { await api.promoteLineage(edgeId); flashOk("影子连边已晋升正式"); await refresh(); }
       catch (e) { flashErr(e); }
     }
     async function loadReconcile() {
@@ -262,7 +284,8 @@ createApp({
     return {
       token, user, username, password, err, actionErr, actionOk, tab, nav,
       dash, bridges, lanes, tickets, overloads, gateReleases, seals, blList,
-      lineageEdges, customsJobs, craneJobs, bridgeDetail, ticketDetail,
+      lineageEdges, lineageIntegrity, fateBook, customsJobs, craneJobs,
+      bridgeDetail, ticketDetail,
       reconOne, reconAllItems, proofOne, reconCode, proofCode,
       bridgeForm, laneForm, ticketForm, overloadOpenForm, gateForm, sealForm,
       blForm, lineageForm, customsForm, craneForm,
@@ -271,6 +294,7 @@ createApp({
       fmtT, ticketClass, shortText,
       createBridge, loadBridgeDetail, createLane, createTicket, loadTicketDetail, selectTicket,
       openOverload, closeOverload, releaseGate, createSeal, registerBl, addLineage,
+      promoteEdge,
       loadReconcile, loadAllReconcile, loadProof, enqueueCustoms, enqueueCrane,
     };
   },

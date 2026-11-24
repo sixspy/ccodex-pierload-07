@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+import edge_write
 from auth import AuthHeader, require_user
 from validators import validate_bl_match
 
@@ -55,6 +56,8 @@ def _reconcile_bl(conn, bl_code: str) -> dict:
             "balanced": False,
             "reason": "无过磅票",
             "tickets": [],
+            "lineage_complete": False,
+            "broken_tickets": [],
         }
     ticket_sum = round(sum(float(t["gross_t"]) for t in tickets), 3)
     declared = float(bl["declared_gross_t"])
@@ -65,12 +68,25 @@ def _reconcile_bl(conn, bl_code: str) -> dict:
            WHERE t.bl_ref=?""",
         (bl_code,),
     ).fetchall()
-    proof_ok = matched and len(seal_rows) >= 1
+    broken = [
+        r["ticket_code"]
+        for r in conn.execute(
+            """SELECT id, ticket_code FROM weigh_tickets
+               WHERE bl_ref=? AND status NOT IN ('作废') ORDER BY id""",
+            (bl_code,),
+        ).fetchall()
+        if not edge_write.ticket_lineage_complete(conn, int(r["id"]))
+    ]
+    lineage_complete = not broken
+    # 账实同态：金额平衡 + 血统齐全 + 至少一份快照，缺一不可出证明
+    proof_ok = matched and lineage_complete and len(seal_rows) >= 1
     return {
         "bl_code": bl_code,
         "declared_gross_t": declared,
         "ticket_sum_t": ticket_sum,
         "balanced": matched,
+        "lineage_complete": lineage_complete,
+        "broken_tickets": broken,
         "proof_ready": proof_ok,
         "seal_count": len(seal_rows),
         "tickets": [dict(t) for t in tickets],
@@ -109,6 +125,9 @@ def proof_ticket(ticket_code: str, authorization: AuthHeader = None):
             manifest_match = validate_bl_match(
                 float(bl["declared_gross_t"]), float(ticket["gross_t"])
             )
+        lineage_complete = edge_write.ticket_lineage_complete(
+            conn, int(ticket["id"])
+        )
         return {
             "ticket_code": ticket_code,
             "bl_ref": ticket["bl_ref"],
@@ -118,7 +137,11 @@ def proof_ticket(ticket_code: str, authorization: AuthHeader = None):
             "seal_generation": seal["ticket_generation"] if seal else None,
             "released": release is not None,
             "overload_closed": overload_closed,
+            "lineage_complete": lineage_complete,
             "coherent": bool(
-                manifest_match and overload_closed and (seal or release)
+                manifest_match
+                and overload_closed
+                and lineage_complete
+                and (seal or release)
             ),
         }
